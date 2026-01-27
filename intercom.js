@@ -15,7 +15,8 @@ function parseArgs() {
         port: 554,
         file: 'music.mp3', // Default
         rate: 8000,        // Default 8000Hz
-        volume: 0.5        // Default 50%
+        volume: 0.5,       // Default 50%
+        debug: false       // Default off
     };
 
     for (let i = 0; i < args.length; i++) {
@@ -44,6 +45,9 @@ function parseArgs() {
             case '--vol':
                 params.volume = parseFloat(args[i + 1]);
                 i++;
+                break;
+            case '--debug':
+                params.debug = true;
                 break;
             case '--help':
                 showHelp();
@@ -91,13 +95,14 @@ console.log(`Port:        ${config.port}`);
 console.log(`Audio File:  ${config.file}`);
 console.log(`Sample Rate: ${config.rate} Hz`);
 console.log(`Volume:      ${config.volume}`);
+console.log(`Debug Mode:  ${config.debug ? 'ON' : 'OFF'}`);
 console.log('------------------------------------------');
 
 // Fixed technical configuration
 const CHUNK_SIZE = 320;
 const FRAME_LEN = 332;
 const MAX_BUFFER_AHEAD_MS = 2000;
-const SPEED_MULTIPLIER = 1.3;
+const SPEED_MULTIPLIER = 1
 
 // --- CAMERA CLIENT CLASS ---
 class CameraClient {
@@ -116,12 +121,32 @@ class CameraClient {
         this.setupSocket();
     }
 
+    logDebug(msg) {
+        if (config.debug) {
+            console.log(`[DEBUG][${this.ip}] ${msg}`);
+        }
+    }
+
     setupSocket() {
+        this.socket.setTimeout(10000); // 10 seconds timeout for initial connection
+
+        this.socket.on('timeout', () => {
+            console.log(`[${this.ip}] Connection timed out. Destroying.`);
+            this.socket.destroy();
+            this.isConnected = false;
+            this.audioQueue = []; // Free memory
+        });
+
         this.socket.on('data', (data) => {
-            // console.log(`[${this.ip}] RX: ${data.toString()}`);
+            console.log(`[${this.ip}] RX: ${data.toString()}`);
+            if (config.debug) {
+                this.logDebug(`RX Data: ${data.toString().trim().replace(/\r\n/g, '\\n')}`);
+            }
+
             if (data.toString().includes('CSeq: 8')) {
                 console.log(`[${this.ip}] >>> Camera accepted. Ready to stream.`);
                 this.isConnected = true;
+                this.socket.setTimeout(0); // Disable timeout while streaming
                 // Try to process queue immediately if we have data waiting
                 if (this.audioQueue.length > 0) this.processQueue();
             }
@@ -143,12 +168,14 @@ class CameraClient {
         this.socket.connect(this.port, this.ip, () => {
             this.socket.setNoDelay(true);
             console.log(`[${this.ip}] >>> Sending OPEN command...`);
+            this.logDebug(`Connected to ${this.ip}:${this.port}. Sending OPEN command.`);
 
-            const openCmd = `USER_CMD_SET rtsp://${this.ip}/onvif0 RTSP/1.0\r\n` +
+            const openCmd = `USER_CMD_SET rtsp://${this.ip}/onvif1 RTSP/1.0\r\n` +
                 `CSeq: 8\r\n` +
                 `Content-length: strlen(Content-type)\r\n` +
                 `Content-type: AudioCtlCmd:OPEN\r\n\r\n`;
             this.socket.write(openCmd);
+            this.logDebug(`Sent OPEN command`);
         });
     }
 
@@ -156,6 +183,15 @@ class CameraClient {
         // Buffer data even if not yet connected, so we don't miss the start of the file
         // while the RTSP handshake is happening.
         this.audioQueue.push(Buffer.from(chunk));
+
+        this.logDebug(`Enqueued chunk. Queue size: ${this.audioQueue.length}`);
+
+        // Prevent memory leak if camera is not connecting/slow
+        // 50000 chunks * 320 bytes = 16MB ~ 50 minutes of audio
+        if (!this.isConnected && this.audioQueue.length > 50000) {
+            this.audioQueue.shift(); // Remove oldest packet
+            this.logDebug(`Queue full (not connected). Dropped oldest packet.`);
+        }
 
         if (this.isConnected && !this.isThrottling) {
             this.processQueue();
@@ -192,17 +228,9 @@ class CameraClient {
                 }
                 this.startTime = Date.now();
             } else {
-                // If the file is fully read but smaller than burst size, or we are just waiting for more data
-                // In case of end of file, we should just send what we have if we want to support short files?
-                // The original logic waits for burst size. 
-                // However, if the file is very short (shorter than burst), it might hang.
-                // But generally MP3s/WAVs are longer than 1 sec. 
-                // Let's stick to original logic for now, but if the FFmpeg stream is "done" effectively, we might want to flush. 
-                // Since we don't track "EndOfStream" signal in this class, we'll keep it simple.
-                // Assuming normal audio files.
-
                 // Wait for more data
                 this.isThrottling = false;
+                this.logDebug(`Buffering... Current: ${this.audioQueue.length}, Need: ${burstPackets}`);
                 return;
             }
         }
@@ -213,6 +241,7 @@ class CameraClient {
 
         if (audioTimeSentAdjusted > timeElapsed + MAX_BUFFER_AHEAD_MS) {
             // Buffer is full, wait a bit
+            // this.logDebug(`Throttling... Ahead: ${(audioTimeSentAdjusted - timeElapsed).toFixed(2)}ms`); 
             setTimeout(() => this.processQueue(), 10);
             return;
         }
