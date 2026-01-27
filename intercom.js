@@ -1,6 +1,6 @@
 /**
  * YOOSEE CAMERA INTERCOM CLIENT
- * Usage: node intercom.js --ip <IP> [options]
+ * Usage: node intercom.js --ip <IP1,IP2...> [options]
  */
 
 const net = require('net');
@@ -11,7 +11,7 @@ const path = require('path');
 function parseArgs() {
     const args = process.argv.slice(2);
     const params = {
-        ip: null,
+        ips: [],
         port: 554,
         file: 'music.mp3', // Default
         rate: 8000,        // Default 8000Hz
@@ -21,7 +21,12 @@ function parseArgs() {
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {
             case '--ip':
-                params.ip = args[i + 1];
+                // Support comma-separated IPs or multiple --ip flags
+                const ipInput = args[i + 1];
+                if (ipInput) {
+                    const extractedIps = ipInput.split(',').map(ip => ip.trim()).filter(ip => ip);
+                    params.ips.push(...extractedIps);
+                }
                 i++;
                 break;
             case '--port':
@@ -46,11 +51,14 @@ function parseArgs() {
         }
     }
 
-    if (!params.ip) {
+    if (params.ips.length === 0) {
         console.error('Error: Missing required argument --ip');
         showHelp();
         process.exit(1);
     }
+
+    // Deduplicate IPs
+    params.ips = [...new Set(params.ips)];
 
     return params;
 }
@@ -60,6 +68,9 @@ function showHelp() {
 Usage:
   node intercom.js --ip <IP_ADDRESS> [options]
 
+  You can broadcast to multiple cameras by separating IPs with commas:
+  node intercom.js --ip 192.168.1.10,192.168.1.11
+
 Optional parameters:
   --port <number>   RTSP Port (Default: 554)
   --file <path>     Audio file path (Default: music.mp3)
@@ -67,7 +78,7 @@ Optional parameters:
   --vol  <number>   Volume from 0.1 to 2.0 (Default: 0.5)
 
 Example:
-  node intercom.js --ip 192.168.1.100 --file notification.wav --rate 16000
+  node intercom.js --ip 192.168.1.100,192.168.1.101 --file notification.wav
     `);
 }
 
@@ -75,78 +86,217 @@ Example:
 const config = parseArgs();
 
 console.log('------------------------------------------');
-console.log(`Target IP:   ${config.ip}`);
+console.log(`Target IPs:  ${config.ips.join(', ')}`);
 console.log(`Port:        ${config.port}`);
 console.log(`Audio File:  ${config.file}`);
 console.log(`Sample Rate: ${config.rate} Hz`);
 console.log(`Volume:      ${config.volume}`);
 console.log('------------------------------------------');
 
-// Fixed technical configuration (Based on successful test results)
+// Fixed technical configuration
 const CHUNK_SIZE = 320;
-// Header Length is always fixed for 320 bytes payload structure
-// 320 (data) + 12 (padding) = 332
 const FRAME_LEN = 332;
-
-// Buffer & Speed Tuning
 const MAX_BUFFER_AHEAD_MS = 2000;
 const SPEED_MULTIPLIER = 1.3;
 
-const client = new net.Socket();
-let audioQueue = [];
-let startTime = 0;
-let totalBytesSent = 0;
-let isThrottling = false;
+// --- CAMERA CLIENT CLASS ---
+class CameraClient {
+    constructor(ip, port, sampleRate) {
+        this.ip = ip;
+        this.port = port;
+        this.sampleRate = sampleRate;
 
-// --- CONNECTION ---
-client.connect(config.port, config.ip, () => {
-    client.setNoDelay(true);
-    console.log('>>> Connecting and sending OPEN command...');
+        this.socket = new net.Socket();
+        this.audioQueue = [];
+        this.startTime = 0;
+        this.totalBytesSent = 0;
+        this.isThrottling = false;
+        this.isConnected = false;
 
-    const openCmd = `USER_CMD_SET rtsp://${config.ip}/onvif0 RTSP/1.0\r\n` +
-        `CSeq: 8\r\n` +
-        `Content-length: strlen(Content-type)\r\n` +
-        `Content-type: AudioCtlCmd:OPEN\r\n\r\n`;
-    client.write(openCmd);
-});
-
-client.on('data', (data) => {
-    console.log(data.toString())
-    if (data.toString().includes('CSeq: 8')) {
-        console.log('>>> Camera accepted. Streaming...');
-        startStreaming();
+        this.setupSocket();
     }
-});
 
-client.on('error', (err) => {
-    console.error(`!!! Connection error: ${err.message}`);
-    process.exit(1);
-});
+    setupSocket() {
+        this.socket.on('data', (data) => {
+            // console.log(`[${this.ip}] RX: ${data.toString()}`);
+            if (data.toString().includes('CSeq: 8')) {
+                console.log(`[${this.ip}] >>> Camera accepted. Ready to stream.`);
+                this.isConnected = true;
+                // Try to process queue immediately if we have data waiting
+                if (this.audioQueue.length > 0) this.processQueue();
+            }
+        });
 
-function startStreaming() {
+        this.socket.on('error', (err) => {
+            console.error(`[${this.ip}] !!! Connection error: ${err.message}`);
+            this.isConnected = false;
+        });
+
+        this.socket.on('close', () => {
+            console.log(`[${this.ip}] Connection closed.`);
+            this.isConnected = false;
+        });
+    }
+
+    connect() {
+        console.log(`[${this.ip}] Connecting...`);
+        this.socket.connect(this.port, this.ip, () => {
+            this.socket.setNoDelay(true);
+            console.log(`[${this.ip}] >>> Sending OPEN command...`);
+
+            const openCmd = `USER_CMD_SET rtsp://${this.ip}/onvif0 RTSP/1.0\r\n` +
+                `CSeq: 8\r\n` +
+                `Content-length: strlen(Content-type)\r\n` +
+                `Content-type: AudioCtlCmd:OPEN\r\n\r\n`;
+            this.socket.write(openCmd);
+        });
+    }
+
+    enqueue(chunk) {
+        // Buffer data even if not yet connected, so we don't miss the start of the file
+        // while the RTSP handshake is happening.
+        this.audioQueue.push(Buffer.from(chunk));
+
+        if (this.isConnected && !this.isThrottling) {
+            this.processQueue();
+        }
+    }
+
+    processQueue() {
+        // If not connected yet, keeps packets in queue.
+        // If socket is destroyed, we can clear.
+        if (this.socket.destroyed) {
+            this.audioQueue = [];
+            return;
+        }
+
+        if (!this.isConnected) {
+            return;
+        }
+
+        this.isThrottling = true;
+
+        if (this.audioQueue.length === 0) {
+            this.isThrottling = false;
+            return;
+        }
+
+        if (this.startTime === 0) {
+            // BURST Logic
+            const burstPackets = Math.floor(this.sampleRate * 2 / CHUNK_SIZE);
+
+            if (this.audioQueue.length > burstPackets) {
+                console.log(`[${this.ip}] >>> Bursting ${burstPackets} packets...`);
+                for (let i = 0; i < burstPackets; i++) {
+                    this.sendRtspFrame(this.audioQueue.shift());
+                }
+                this.startTime = Date.now();
+            } else {
+                // If the file is fully read but smaller than burst size, or we are just waiting for more data
+                // In case of end of file, we should just send what we have if we want to support short files?
+                // The original logic waits for burst size. 
+                // However, if the file is very short (shorter than burst), it might hang.
+                // But generally MP3s/WAVs are longer than 1 sec. 
+                // Let's stick to original logic for now, but if the FFmpeg stream is "done" effectively, we might want to flush. 
+                // Since we don't track "EndOfStream" signal in this class, we'll keep it simple.
+                // Assuming normal audio files.
+
+                // Wait for more data
+                this.isThrottling = false;
+                return;
+            }
+        }
+
+        const timeElapsed = Date.now() - this.startTime;
+        const bytesPerSecond = this.sampleRate * 2;
+        const audioTimeSentAdjusted = ((this.totalBytesSent / bytesPerSecond) * 1000) / SPEED_MULTIPLIER;
+
+        if (audioTimeSentAdjusted > timeElapsed + MAX_BUFFER_AHEAD_MS) {
+            // Buffer is full, wait a bit
+            setTimeout(() => this.processQueue(), 10);
+            return;
+        }
+
+        const chunk = this.audioQueue.shift();
+        if (chunk) {
+            this.sendRtspFrame(chunk);
+        }
+
+        // Continue processing next loop
+        setImmediate(() => this.processQueue());
+    }
+
+    sendRtspFrame(chunk) {
+        if (this.socket.destroyed) return;
+
+        const header = Buffer.alloc(4);
+        header[0] = 0x24; // $
+        header[1] = 0x02; // Channel 2
+        header.writeUInt16LE(FRAME_LEN, 2);
+
+        const padding = Buffer.alloc(12, 0);
+        try {
+            this.socket.write(Buffer.concat([header, padding, chunk]));
+            this.totalBytesSent += chunk.length;
+        } catch (e) {
+            console.error(`[${this.ip}] Write error:`, e.message);
+        }
+    }
+
+    stop() {
+        console.log(`[${this.ip}] >>> Disconnecting...`);
+        const closeCmd = `USER_CMD_SET rtsp://${this.ip}/onvif1 RTSP/1.0\r\n` +
+            `CSeq: 10\r\n` +
+            `Content-length: strlen(Content-type)\r\n` +
+            `Content-type: AudioCtlCmd:CLOSE\r\n\r\n`;
+
+        if (this.socket.writable) {
+            try {
+                this.socket.write(closeCmd);
+            } catch (e) { /* ignore */ }
+        }
+
+        setTimeout(() => {
+            this.socket.destroy();
+        }, 50);
+    }
+}
+
+// --- INITIALIZE CLIENTS ---
+const clients = config.ips.map(ip => new CameraClient(ip, config.port, config.rate));
+
+// Connect all clients
+clients.forEach(client => client.connect());
+
+// Start centralized FFmpeg
+startCentralizedStreaming();
+
+function startCentralizedStreaming() {
+    console.log(`>>> Starting FFmpeg transcoding for ${clients.length} clients...`);
+
     const ffmpeg = spawn('ffmpeg', [
         '-i', config.file,
         '-f', 's16le',
         '-acodec', 'pcm_s16le',
-        '-ar', config.rate.toString(), // Use rate from arguments
+        '-ar', config.rate.toString(),
         '-ac', '1',
         '-filter:a', `volume=${config.volume}`,
         'pipe:1'
     ]);
 
     ffmpeg.stdout.on('data', (chunk) => {
+        // Fan-out chunks to all connected clients
         for (let i = 0; i < chunk.length; i += CHUNK_SIZE) {
             const subChunk = chunk.slice(i, i + CHUNK_SIZE);
-            if (subChunk.length === CHUNK_SIZE) audioQueue.push(subChunk);
+            if (subChunk.length === CHUNK_SIZE) {
+                clients.forEach(client => client.enqueue(subChunk));
+            }
         }
-        if (!isThrottling) processQueue();
     });
 
     ffmpeg.on('close', () => console.log('>>> Finished reading audio file.'));
 
-    // Catch error if file does not exist or ffmpeg error
     ffmpeg.stderr.on('data', (data) => {
-        // Only show critical errors
         const msg = data.toString();
         if (msg.includes('No such file') || msg.includes('Error')) {
             console.error(`FFmpeg Error: ${msg}`);
@@ -154,71 +304,11 @@ function startStreaming() {
     });
 }
 
-function processQueue() {
-    isThrottling = true;
-
-    if (audioQueue.length === 0) {
-        isThrottling = false;
-        return;
-    }
-
-    if (startTime === 0) {
-        // BURST first 1 second (based on sample rate)
-        // Rate 8000 -> 16000 bytes/s -> ~50 packets (320 bytes)
-        // Rate 16000 -> 32000 bytes/s -> ~100 packets
-        const burstPackets = Math.floor(config.rate * 2 / CHUNK_SIZE);
-
-        if (audioQueue.length > burstPackets) {
-            console.log(`>>> Bursting ${burstPackets} packets...`);
-            for (let i = 0; i < burstPackets; i++) {
-                sendRtspFrame(audioQueue.shift());
-            }
-            startTime = Date.now();
-        } else {
-            isThrottling = false;
-            return;
-        }
-    }
-
-    const timeElapsed = Date.now() - startTime;
-
-    // Calculate based on dynamic sample rate
-    // Bytes per second = Rate * 2 (16-bit)
-    const bytesPerSecond = config.rate * 2;
-    const audioTimeSentAdjusted = ((totalBytesSent / bytesPerSecond) * 1000) / SPEED_MULTIPLIER;
-
-    if (audioTimeSentAdjusted > timeElapsed + MAX_BUFFER_AHEAD_MS) {
-        setTimeout(processQueue, 10);
-        return;
-    }
-
-    const chunk = audioQueue.shift();
-    sendRtspFrame(chunk);
-    setImmediate(processQueue);
-}
-
-function sendRtspFrame(chunk) {
-    const header = Buffer.alloc(4);
-    header[0] = 0x24; // $
-    header[1] = 0x02; // Channel 2
-    header.writeUInt16LE(FRAME_LEN, 2);
-
-    const padding = Buffer.alloc(12, 0);
-    client.write(Buffer.concat([header, padding, chunk]));
-    totalBytesSent += chunk.length;
-}
-
 // Handle stop
 process.on('SIGINT', () => {
-    console.log('\n>>> Disconnecting...');
-    const closeCmd = `USER_CMD_SET rtsp://${config.ip}/onvif1 RTSP/1.0\r\n` +
-        `CSeq: 10\r\n` +
-        `Content-length: strlen(Content-type)\r\n` +
-        `Content-type: AudioCtlCmd:CLOSE\r\n\r\n`;
-
-    if (client.writable) client.write(closeCmd);
+    console.log('\n>>> Stopping all streams...');
+    clients.forEach(client => client.stop());
     setTimeout(() => {
-        client.destroy();
         process.exit();
-    }, 50);
+    }, 100);
 });
