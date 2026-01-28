@@ -1,6 +1,6 @@
-# Yoosee Camera Intercom Client (Node.js)
+# Yoosee Camera Intercom Client (Node.js & Python)
 
-A lightweight Node.js CLI tool to stream local audio files (MP3, WAV, etc.) to Yoosee, and similar generic IP cameras via the RTSP backchannel.
+A lightweight CLI tool (available in both **Node.js** and **Python**) to stream local audio files (MP3, WAV, etc.) to Yoosee and similar generic IP cameras via the RTSP backchannel.
 
 This script implements a custom Smart Buffering algorithm to solve common stuttering issues caused by network jitter and firmware buffer underruns, while keeping latency manageable.
 
@@ -10,7 +10,9 @@ This script implements a custom Smart Buffering algorithm to solve common stutte
 - **Smart Buffering**: Implements a "Burst & Maintain" strategy to prevent audio stuttering.
 - **Auto-Transcoding**: Uses FFmpeg to convert any audio format to the specific PCM 16-bit Little Endian format required by the camera on the fly.
 - **Volume Control**: Software-based gain control to prevent speaker clipping/static noise.
-- **No External NPM Dependencies**: Uses only native Node.js modules (`net`, `child_process`).
+- **Zero Dependencies**: 
+  - **Node.js version**: Uses only native modules.
+  - **Python version**: Uses standard library (`socket`, `subprocess`, `threading`).
 
 ## Prerequisites
 
@@ -19,6 +21,7 @@ This script implements a custom Smart Buffering algorithm to solve common stutte
    - **Windows**: Download from ffmpeg.org and add text `bin` folder to Environment Variables.
    - **Linux**: `sudo apt install ffmpeg`
    - **macOS**: `brew install ffmpeg`
+3. **Python (Optional)**: Version 3.x if you prefer to use the Python script.
 
 ## Installation
 
@@ -47,6 +50,22 @@ node intercom.js --ip 192.168.1.100
 node intercom.js --ip 192.168.1.100 --port 554 --file alert.wav --rate 16000 --vol 0.8
 ```
 
+## Usage (Python)
+
+The Python version (`intercom.py`) offers the exact same functionality with identical arguments.
+
+### Basic Command
+
+```bash
+python intercom.py --ip 192.168.1.100
+```
+
+### Advanced Usage
+
+```bash
+python intercom.py --ip 192.168.1.100 --port 554 --file alert.wav --rate 16000 --vol 0.8
+```
+
 ## Arguments
 
 | Flag | Description | Default |
@@ -59,7 +78,7 @@ node intercom.js --ip 192.168.1.100 --port 554 --file alert.wav --rate 16000 --v
 
 ## How It Works (Technical Deep Dive)
 
-This script works by emulating the specific, non-standard RTSP implementation used by Yoosee/Goke firmware.
+This script works by emulating the specific, non-standard RTSP implementation used by Yoosee firmware.
 
 ### 1. The Handshake Quirk
 Unlike standard RTSP which uses ANNOUNCE or SETUP for backchannels, these cameras use a custom command `USER_CMD_SET` with a specific header quirk:
