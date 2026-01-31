@@ -7,6 +7,9 @@ const net = require('net');
 const spawn = require('child_process').spawn;
 const path = require('path');
 
+console.warn('\x1b[33m%s\x1b[0m', 'WARNING: This Node.js version is DEPRECATED. Please use intercom.py instead.');
+
+
 // --- COMMAND LINE ARGUMENT PARSING FUNCTION ---
 function parseArgs() {
     const args = process.argv.slice(2);

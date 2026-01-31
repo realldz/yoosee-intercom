@@ -4,6 +4,9 @@ A lightweight CLI tool (available in both **Node.js** and **Python**) to stream 
 
 This script implements a custom Smart Buffering algorithm to solve common stuttering issues caused by network jitter and firmware buffer underruns, while keeping latency manageable.
 
+> [!WARNING]
+> The **Node.js** version of this tool is now **DEPRECATED**. Please use the **Python** version (`intercom.py`) for all future deployments. It includes the latest features (e.g., auto-exit) and fixes.
+
 ## Features
 
 - **RTSP Backchannel Support**: Uses the `USER_CMD_SET` method found in Yoosee firmware.
@@ -34,7 +37,7 @@ cd yoosee-intercom
 
 (Optional) Place your audio file (e.g., `music.mp3`) in the folder.
 
-## Usage
+## Usage (Node.js - DEPRECATED)
 
 Run the script using Node.js. The only required argument is the camera's IP address.
 
@@ -75,6 +78,7 @@ python intercom.py --ip 192.168.1.100 --port 554 --file alert.wav --rate 16000 -
 | `--file` | Path to the audio file to stream. | music.mp3 |
 | `--rate` | Sample rate (Hz). Try 16000 if audio sounds slow. | 8000 |
 | `--vol` | Volume multiplier (0.1 to 2.0). Lower if audio is distorted. | 0.5 |
+| `--auto-exit` | (Python Only) Automatically exit when playback finishes. | False |
 
 ## How It Works (Technical Deep Dive)
 
