@@ -75,7 +75,7 @@ python intercom.py --ip 192.168.1.100 --port 554 --file alert.wav --rate 16000 -
 |------|-------------|---------|
 | `--ip` | The local IP address of the camera. | Required |
 | `--port` | The RTSP port of the camera. | 554 |
-| `--file` | Path to the audio file to stream. | music.mp3 |
+| `--file` | Path to the audio file OR stream URL (RTSP, HTTP, M3U8, etc.). Supports any FFmpeg input. | music.mp3 |
 | `--rate` | Sample rate (Hz). Try 16000 if audio sounds slow. | 8000 |
 | `--vol` | Volume multiplier (0.1 to 2.0). Lower if audio is distorted. | 0.5 |
 | `--auto-exit` | (Python Only) Automatically exit when playback finishes. | False |
