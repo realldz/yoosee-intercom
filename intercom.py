@@ -220,6 +220,7 @@ def parse_args():
     parser.add_argument('--rate', type=int, default=8000, help="Sample rate (Hz)")
     parser.add_argument('--vol', type=float, default=0.5, help="Volume (0.0-2.0)")
     parser.add_argument('--debug', action='store_true', help="Enable debug logs")
+    parser.add_argument('--auto-exit', action='store_true', help="Automatically exit when playback finishes")
     
     return parser.parse_args()
 
@@ -238,6 +239,7 @@ def main():
     print(f"Sample Rate: {args.rate} Hz")
     print(f"Volume:      {args.vol}")
     print(f"Debug Mode:  {'ON' if args.debug else 'OFF'}")
+    print(f"Auto Exit:   {'ON' if args.auto_exit else 'OFF'}")
     print('------------------------------------------')
     
     clients = []
@@ -257,6 +259,13 @@ def main():
             time.sleep(0.5)
             
         print(">>> Buffer empty. Waiting for manual stop (Ctrl+C)...")
+        if args.auto_exit:
+            print(">>> Auto-exit enabled. Exiting in 2 seconds...")
+            time.sleep(2)
+            for client in clients:
+                client.stop()
+            sys.exit(0)
+
         while True:
             time.sleep(1)
             
